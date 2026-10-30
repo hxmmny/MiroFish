@@ -641,6 +641,7 @@ class SimulationRunner:
         
         monitor_error: Exception | None = None
         exit_code: int | None = None
+        completion_published = False
         try:
             while process.poll() is None:  # 进程仍在运行
                 # 读取 Twitter 动作日志
@@ -655,6 +656,13 @@ class SimulationRunner:
                         reddit_actions_log, reddit_position, state, "reddit"
                     )
                 
+                # The parallel runner stays alive after its last round to serve
+                # interview commands, so process exit cannot be the only
+                # completion signal. Publish COMPLETED once every enabled
+                # platform has logged simulation_end, keeping the process.
+                if not completion_published and cls._check_all_platforms_completed(state):
+                    completion_published = cls._publish_completion_while_alive(simulation_id, state)
+
                 # 更新状态
                 cls._save_run_state(state)
                 time.sleep(2)
@@ -683,6 +691,7 @@ class SimulationRunner:
                 if state.runner_status not in {
                     RunnerStatus.STOPPED,
                     RunnerStatus.FAILED,
+                    RunnerStatus.COMPLETED,
                 }:
                     manual_stop = simulation_id in cls._manual_stop_requests
                     desired_status = (
@@ -767,6 +776,47 @@ class SimulationRunner:
                     pass
                 cls._stderr_files.pop(simulation_id, None)
     
+    @classmethod
+    def _publish_completion_while_alive(cls, simulation_id: str, state: SimulationRunState) -> bool:
+        """Mark a run COMPLETED after all platforms ended, without killing the
+        command-wait process. Drains Zep ingestion first so reports never see
+        COMPLETED before graph memory is fully written."""
+        with cls._finalization_lock(simulation_id):
+            latest = cls.get_run_state(simulation_id)
+            if latest is not None and latest.runner_status in {
+                RunnerStatus.STOPPED,
+                RunnerStatus.FAILED,
+                RunnerStatus.COMPLETED,
+            }:
+                return True
+            if simulation_id in cls._manual_stop_requests:
+                return True
+
+            state.twitter_running = False
+            state.reddit_running = False
+            status = RunnerStatus.COMPLETED
+            error_message = None
+
+            if cls._graph_memory_enabled.get(simulation_id, False):
+                state.runner_status = RunnerStatus.STOPPING
+                cls._save_run_state(state)
+                cls._sync_simulation_status(simulation_id, RunnerStatus.STOPPING)
+                try:
+                    ZepGraphMemoryManager.stop_updater(simulation_id)
+                    cls._graph_memory_enabled.pop(simulation_id, None)
+                except Exception as error:
+                    logger.error(f"停止图谱记忆更新器失败: {error}")
+                    status = RunnerStatus.FAILED
+                    error_message = f"Zep图谱写入未完整完成: {error}"
+
+            state.runner_status = status
+            state.error = error_message
+            state.completed_at = datetime.now().isoformat()
+            cls._save_run_state(state)
+            cls._sync_simulation_status(simulation_id, status, error_message)
+            logger.info(f"模拟完成（进程保持等待命令）: {simulation_id}, status={status}")
+            return True
+
     @classmethod
     def _read_action_log(
         cls, 

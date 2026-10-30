@@ -1027,7 +1027,7 @@ class OasisProfileGenerator:
                         progress_callback(
                             current, 
                             total, 
-                            f"已完成 {current}/{total}: {entity.name}（{entity_type}）"
+                            (f"已完成 {current}/{total}: {entity.name}（{entity_type}）" if get_locale() == 'zh' else f"Completed {current}/{total}: {entity.name} ({entity_type})")
                         )
                     
                     if error:
