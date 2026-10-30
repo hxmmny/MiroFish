@@ -154,28 +154,40 @@ def _estimate_tokens(messages: List[Dict[str, Any]], tools: Optional[List[Dict[s
     return int(chars / _CHARS_PER_TOKEN) + 64
 
 
+def _shorten(content: str, cut: int) -> str:
+    keep = len(content) - cut
+    head = int(keep * 0.7)
+    return content[:head] + _TRIM_MARKER + content[len(content) - (keep - head):]
+
+
 def _trim_messages(messages: List[Dict[str, Any]], excess_tokens: int) -> List[Dict[str, Any]]:
-    """Shorten the longest string contents (never the first system prompt or
-    the final message) by keeping their head and tail."""
+    """Shorten the longest string contents by keeping their head and tail.
+
+    Middle messages (older observations) are trimmed first. If that is not
+    enough, the final message (usually the newest tool observation) and the
+    system prompt are trimmed too, down to a floor that preserves their
+    instructions."""
     trimmed = [dict(m) for m in messages]
     excess_chars = int(excess_tokens * _CHARS_PER_TOKEN) + 200
-    protected = {0, len(trimmed) - 1} if len(trimmed) > 2 else set()
-    while excess_chars > 0:
-        candidates = [
-            (len(m["content"]), i) for i, m in enumerate(trimmed)
-            if i not in protected and isinstance(m.get("content"), str) and len(m["content"]) > 1200
-        ]
-        if not candidates:
+    last = len(trimmed) - 1
+    protected = {0, last} if len(trimmed) > 2 else set()
+    passes = [(lambda i: i not in protected, 800), (lambda i: i == last, 2000), (lambda i: i == 0, 3000)]
+    for eligible, floor in passes:
+        while excess_chars > 0:
+            candidates = [
+                (len(m["content"]), i) for i, m in enumerate(trimmed)
+                if eligible(i) and isinstance(m.get("content"), str) and len(m["content"]) > floor + 400
+            ]
+            if not candidates:
+                break
+            length, i = max(candidates)
+            cut = min(excess_chars + len(_TRIM_MARKER), length - floor)
+            if cut <= len(_TRIM_MARKER):
+                break
+            trimmed[i]["content"] = _shorten(trimmed[i]["content"], cut)
+            excess_chars -= cut - len(_TRIM_MARKER)
+        if excess_chars <= 0:
             break
-        length, i = max(candidates)
-        cut = min(excess_chars + len(_TRIM_MARKER), length - 800)
-        if cut <= len(_TRIM_MARKER):
-            break
-        keep = length - cut
-        head = int(keep * 0.7)
-        content = trimmed[i]["content"]
-        trimmed[i]["content"] = content[:head] + _TRIM_MARKER + content[length - (keep - head):]
-        excess_chars -= cut - len(_TRIM_MARKER)
     return trimmed
 
 
@@ -247,7 +259,12 @@ def create_chat_completion(
             if kind is None or attempt == attempts - 1:
                 raise
             if kind == "too_large":
-                limit = int(limit * 0.8)
+                reported = _re.search(r"Limit (\d+), Requested (\d+)", str(error))
+                if reported:
+                    ratio = int(reported.group(1)) / max(1, int(reported.group(2)))
+                    limit = int(limit * min(0.85, ratio * 0.9))
+                else:
+                    limit = int(limit * 0.8)
                 messages, max_tokens = _fit_to_budget(limit, messages, tools, max_tokens)
                 delay = 1.0
             else:
