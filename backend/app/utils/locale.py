@@ -20,6 +20,26 @@ for filename in os.listdir(_locales_dir):
             _translations[locale_name] = json.load(f)
 
 
+_supported_locales = set(_languages) | set(_translations)
+DEFAULT_LOCALE = os.environ.get('MIROFISH_DEFAULT_LOCALE', 'en').strip().lower()
+if DEFAULT_LOCALE not in _supported_locales:
+    DEFAULT_LOCALE = 'zh'
+
+
+def resolve_locale(raw: str) -> str:
+    """Resolve an Accept-Language value (e.g. "en-US,en;q=0.9") to a supported locale."""
+    for part in (raw or '').split(','):
+        tag = part.split(';')[0].strip().lower()
+        if not tag:
+            continue
+        if tag in _supported_locales:
+            return tag
+        primary = tag.split('-')[0]
+        if primary in _supported_locales:
+            return primary
+    return DEFAULT_LOCALE
+
+
 def set_locale(locale: str):
     """Set locale for current thread. Call at the start of background threads."""
     _thread_local.locale = locale
@@ -27,14 +47,13 @@ def set_locale(locale: str):
 
 def get_locale() -> str:
     if has_request_context():
-        raw = request.headers.get('Accept-Language', 'zh')
-        return raw if raw in _translations else 'zh'
-    return getattr(_thread_local, 'locale', 'zh')
+        return resolve_locale(request.headers.get('Accept-Language', ''))
+    return getattr(_thread_local, 'locale', DEFAULT_LOCALE)
 
 
 def t(key: str, **kwargs) -> str:
     locale = get_locale()
-    messages = _translations.get(locale, _translations.get('zh', {}))
+    messages = _translations.get(locale, _translations.get('en', _translations.get('zh', {})))
 
     value = messages
     for part in key.split('.'):
@@ -65,5 +84,5 @@ def t(key: str, **kwargs) -> str:
 
 def get_language_instruction() -> str:
     locale = get_locale()
-    lang_config = _languages.get(locale, _languages.get('zh', {}))
+    lang_config = _languages.get(locale, _languages.get(DEFAULT_LOCALE, {}))
     return lang_config.get('llmInstruction', '请使用中文回答。')

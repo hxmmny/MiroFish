@@ -25,6 +25,8 @@ def create_chat_completion(
     temperature: Optional[float] = None,
     max_tokens: Optional[int] = None,
     response_format: Optional[Dict[str, Any]] = None,
+    tools: Optional[List[Dict[str, Any]]] = None,
+    tool_choice: Optional[Any] = None,
 ) -> Any:
     """
     Create a chat completion with model-specific request parameters.
@@ -42,6 +44,11 @@ def create_chat_completion(
 
     if response_format is not None:
         kwargs["response_format"] = response_format
+
+    if tools:
+        kwargs["tools"] = tools
+        if tool_choice is not None:
+            kwargs["tool_choice"] = tool_choice
 
     gpt5_family = is_gpt5_family(model)
 

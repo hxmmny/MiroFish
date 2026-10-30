@@ -17,7 +17,7 @@ from zep_cloud import NotFoundError
 from ..config import Config
 from ..utils.logger import get_logger
 from ..utils.llm_client import LLMClient
-from ..utils.locale import get_locale, t
+from ..utils.locale import get_locale, get_language_instruction, t
 from ..utils.zep_paging import fetch_all_nodes, fetch_all_edges
 from ..utils.zep import (
     call_zep_read_with_retry,
@@ -1107,6 +1107,7 @@ class ZepToolsService:
 3. 子问题应该与模拟场景相关
 4. 返回JSON格式：{"sub_queries": ["子问题1", "子问题2", ...]}"""
 
+        system_prompt = f"{system_prompt}\n\n{get_language_instruction()} Keep JSON keys exactly as specified."
         user_prompt = f"""模拟需求背景：
 {simulation_requirement}
 
@@ -1347,17 +1348,31 @@ class ZepToolsService:
         combined_prompt = "\n".join([f"{i+1}. {q}" for i, q in enumerate(result.interview_questions)])
         
         # 添加优化前缀，约束Agent回复格式
-        INTERVIEW_PROMPT_PREFIX = (
-            "你正在接受一次采访。请结合你的人设、所有的过往记忆与行动，"
-            "以纯文本方式直接回答以下问题。\n"
-            "回复要求：\n"
-            "1. 直接用自然语言回答，不要调用任何工具\n"
-            "2. 不要返回JSON格式或工具调用格式\n"
-            "3. 不要使用Markdown标题（如#、##、###）\n"
-            "4. 按问题编号逐一回答，每个回答以「问题X：」开头（X为问题编号）\n"
-            "5. 每个问题的回答之间用空行分隔\n"
-            "6. 回答要有实质内容，每个问题至少回答2-3句话\n\n"
-        )
+        if get_locale() == 'zh':
+            INTERVIEW_PROMPT_PREFIX = (
+                "你正在接受一次采访。请结合你的人设、所有的过往记忆与行动，"
+                "以纯文本方式直接回答以下问题。\n"
+                "回复要求：\n"
+                "1. 直接用自然语言回答，不要调用任何工具\n"
+                "2. 不要返回JSON格式或工具调用格式\n"
+                "3. 不要使用Markdown标题（如#、##、###）\n"
+                "4. 按问题编号逐一回答，每个回答以「问题X：」开头（X为问题编号）\n"
+                "5. 每个问题的回答之间用空行分隔\n"
+                "6. 回答要有实质内容，每个问题至少回答2-3句话\n\n"
+            )
+        else:
+            INTERVIEW_PROMPT_PREFIX = (
+                "You are being interviewed. Drawing on your persona and all of your past memories "
+                "and actions, answer the following questions directly in plain text.\n"
+                "Requirements:\n"
+                "1. Answer in natural language; do not call any tools\n"
+                "2. Do not return JSON or tool-call formats\n"
+                "3. Do not use Markdown headings (#, ##, ###)\n"
+                "4. Answer each question in order, starting each answer with \"Question X:\" (X is the question number)\n"
+                "5. Separate answers with a blank line\n"
+                "6. Give substantive answers of at least 2-3 sentences each\n"
+                f"7. {get_language_instruction()}\n\n"
+            )
         optimized_prompt = f"{INTERVIEW_PROMPT_PREFIX}{combined_prompt}"
         
         # Step 4: 调用真实的采访API（不指定platform，默认双平台同时采访）
@@ -1425,19 +1440,21 @@ class ZepToolsService:
                 clean_text = re.sub(r'#{1,6}\s+', '', combined_responses)
                 clean_text = re.sub(r'\{[^}]*tool_name[^}]*\}', '', clean_text)
                 clean_text = re.sub(r'[*_`|>~\-]{2,}', '', clean_text)
-                clean_text = re.sub(r'问题\d+[：:]\s*', '', clean_text)
+                clean_text = re.sub(r'(?:问题|Question)\s*\d+[：:]\s*', '', clean_text, flags=re.IGNORECASE)
                 clean_text = re.sub(r'【[^】]+】', '', clean_text)
 
                 # 策略1（主）: 提取完整的有实质内容的句子
-                sentences = re.split(r'[。！？]', clean_text)
+                # Split on CJK terminators, and after Latin ones (kept on the sentence)
+                sentences = re.split(r'[。！？]|(?<=[.!?])\s+', clean_text)
                 meaningful = [
                     s.strip() for s in sentences
                     if 20 <= len(s.strip()) <= 150
                     and not re.match(r'^[\s\W，,；;：:、]+', s.strip())
-                    and not s.strip().startswith(('{', '问题'))
+                    and not s.strip().startswith(('{', '问题', 'Question'))
                 ]
                 meaningful.sort(key=len, reverse=True)
-                key_quotes = [s + "。" for s in meaningful[:3]]
+                sentence_end = "。" if get_locale() == 'zh' else "."
+                key_quotes = [s if s[-1] in ".!?。！？" else s + sentence_end for s in meaningful[:3]]
 
                 # 策略2（补充）: 正确配对的中文引号「」内长文本
                 if not key_quotes:
@@ -1589,6 +1606,7 @@ class ZepToolsService:
     "reasoning": "选择理由说明"
 }"""
 
+        system_prompt = f"{system_prompt}\n\n{get_language_instruction()} Keep JSON keys exactly as specified."
         user_prompt = f"""采访需求：
 {interview_requirement}
 
@@ -1651,6 +1669,7 @@ class ZepToolsService:
 
 返回JSON格式：{"questions": ["问题1", "问题2", ...]}"""
 
+        system_prompt = f"{system_prompt}\n\n{get_language_instruction()} Keep JSON keys exactly as specified."
         user_prompt = f"""采访需求：{interview_requirement}
 
 模拟背景：{simulation_requirement if simulation_requirement else "未提供"}
@@ -1710,6 +1729,7 @@ class ZepToolsService:
 - {quote_instruction}
 - 可以使用**加粗**标记关键词，但不要使用其他Markdown语法"""
 
+        system_prompt = f"{system_prompt}\n\n{get_language_instruction()} Keep JSON keys exactly as specified."
         user_prompt = f"""采访主题：{interview_requirement}
 
 采访内容：

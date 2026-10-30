@@ -1130,6 +1130,80 @@ class ReportAgent:
             return True
         return False
     
+    # JSON-schema types for each tool parameter, used for native registration
+    TOOL_PARAMETER_SCHEMAS = {
+        "insight_forge": ({"query": "string", "report_context": "string"}, ["query"]),
+        "panorama_search": ({"query": "string", "include_expired": "boolean"}, ["query"]),
+        "quick_search": ({"query": "string", "limit": "integer"}, ["query"]),
+        "interview_agents": ({"interview_topic": "string", "max_agents": "integer"}, ["interview_topic"]),
+    }
+
+    def _native_tool_schemas(self) -> List[Dict[str, Any]]:
+        """OpenAI-format function definitions for the report tools."""
+        schemas = []
+        for name, tool in self.tools.items():
+            if name not in self.TOOL_PARAMETER_SCHEMAS:
+                continue
+            types, required = self.TOOL_PARAMETER_SCHEMAS[name]
+            properties = {
+                param: {"type": json_type, "description": tool["parameters"].get(param, "")}
+                for param, json_type in types.items()
+            }
+            schemas.append({
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "description": tool["description"],
+                    "parameters": {"type": "object", "properties": properties, "required": required},
+                },
+            })
+        return schemas
+
+    def _normalize_tool_call(self, call: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Map a native call onto a known tool, unwrapping wrappers like tool.exec(name=..., parameters=...)."""
+        name = str(call.get("name") or "")
+        params = call.get("parameters") or {}
+        if name not in self.VALID_TOOL_NAMES and isinstance(params, dict) and params.get("name") in self.VALID_TOOL_NAMES:
+            name = params["name"]
+            params = params.get("parameters") or params.get("arguments") or {}
+        if name not in self.VALID_TOOL_NAMES:
+            name = name.rsplit(".", 1)[-1]
+        if name not in self.VALID_TOOL_NAMES:
+            return None
+        return {"name": name, "parameters": params if isinstance(params, dict) else {}}
+
+    def _react_llm(
+        self,
+        messages: List[Dict[str, Any]],
+        temperature: float = 0.5,
+        max_tokens: Optional[int] = 4096,
+        allow_tools: bool = True,
+    ) -> str:
+        """
+        One ReACT turn with the tools registered natively.
+
+        Native calls are rendered as the canonical <tool_call> block so the
+        loop keeps a single protocol whether the model used native calling
+        (e.g. GPT-OSS) or the prompt's text format. With allow_tools=False
+        (forced final answers) native calls are dropped.
+        """
+        result = self.llm.chat_with_tools(
+            messages=messages,
+            tools=self._native_tool_schemas(),
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+        content = result.get("content") or ""
+        if not allow_tools:
+            return content
+        calls = [c for c in (self._normalize_tool_call(raw) for raw in result.get("tool_calls", [])) if c]
+        if not calls:
+            return content
+        blocks = "\n".join(
+            f"<tool_call>{json.dumps(c, ensure_ascii=False)}</tool_call>" for c in calls
+        )
+        return f"{content}\n{blocks}".strip() if content else blocks
+
     def _get_tools_description(self) -> str:
         """生成工具描述文本"""
         desc_parts = ["可用工具："]
@@ -1341,7 +1415,7 @@ class ReportAgent:
                 )
             
             # 调用LLM
-            response = self.llm.chat(
+            response = self._react_llm(
                 messages=messages,
                 temperature=0.5,
                 max_tokens=4096
@@ -1547,10 +1621,11 @@ class ReportAgent:
         logger.warning(t('report.sectionMaxIter', title=section.title))
         messages.append({"role": "user", "content": REACT_FORCE_FINAL_MSG})
         
-        response = self.llm.chat(
+        response = self._react_llm(
             messages=messages,
             temperature=0.5,
-            max_tokens=4096
+            max_tokens=4096,
+            allow_tools=False
         )
 
         # 检查强制收尾时 LLM 返回是否为 None
@@ -1869,7 +1944,7 @@ class ReportAgent:
         max_iterations = 2  # 减少迭代轮数
         
         for iteration in range(max_iterations):
-            response = self.llm.chat(
+            response = self._react_llm(
                 messages=messages,
                 temperature=0.5
             )
@@ -1911,9 +1986,10 @@ class ReportAgent:
             })
         
         # 达到最大迭代，获取最终响应
-        final_response = self.llm.chat(
+        final_response = self._react_llm(
             messages=messages,
-            temperature=0.5
+            temperature=0.5,
+            allow_tools=False
         )
         
         # 清理响应

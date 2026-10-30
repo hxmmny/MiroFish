@@ -462,15 +462,18 @@ class SimulationRunner:
         else:
             cls._graph_memory_enabled[simulation_id] = False
         
-        # 确定运行哪个脚本（脚本位于 backend/scripts/ 目录）
+        # Always use the parallel runner: it is the only script that writes the
+        # per-platform actions.jsonl the monitor reads. The legacy single-platform
+        # scripts never emit those logs, so runs stalled at round 0 (upstream #861).
+        script_name = "run_parallel_simulation.py"
+        platform_flags: List[str] = []
         if platform == "twitter":
-            script_name = "run_twitter_simulation.py"
+            platform_flags = ["--twitter-only"]
             state.twitter_running = True
         elif platform == "reddit":
-            script_name = "run_reddit_simulation.py"
+            platform_flags = ["--reddit-only"]
             state.reddit_running = True
         else:
-            script_name = "run_parallel_simulation.py"
             state.twitter_running = True
             state.reddit_running = True
         
@@ -521,6 +524,7 @@ class SimulationRunner:
             ]
             
             # 如果指定了最大轮数，添加到命令行参数
+            cmd.extend(platform_flags)
             if max_rounds is not None and max_rounds > 0:
                 cmd.extend(["--max-rounds", str(max_rounds)])
             

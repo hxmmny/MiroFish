@@ -88,6 +88,52 @@ def _contains_additional_json_container(content: str) -> bool:
     return False
 
 
+def _decode_tool_call(data: Any) -> Optional[Dict[str, Any]]:
+    """Normalize one {"name", "arguments"|"parameters"} payload into {"name", "parameters"}."""
+
+    if isinstance(data, list):
+        data = next((item for item in data if isinstance(item, dict)), None)
+    if not isinstance(data, dict):
+        return None
+    if isinstance(data.get("function"), dict):
+        data = data["function"]
+    name = data.get("name")
+    args = data.get("arguments", data.get("parameters", {}))
+    if isinstance(args, str):
+        try:
+            args = json.loads(args) if args.strip() else {}
+        except json.JSONDecodeError:
+            args = {}
+    if not isinstance(name, str) or not name or not isinstance(args, dict):
+        return None
+    return {"name": name, "parameters": args}
+
+
+def _recover_failed_tool_generation(error: Exception) -> Optional[Dict[str, Any]]:
+    """
+    Recover the call from a provider "tool_use_failed" rejection.
+
+    Groq rejects a completion with HTTP 400 when the model emits a native tool
+    call the request did not allow, and returns the attempted call as
+    failed_generation. That payload is the model's real intent.
+    """
+
+    if getattr(error, "status_code", None) != 400:
+        return None
+    body = getattr(error, "body", None)
+    details = body.get("error", body) if isinstance(body, dict) else None
+    if not isinstance(details, dict) or details.get("code") != "tool_use_failed":
+        return None
+    raw = details.get("failed_generation")
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    try:
+        data, _ = json.JSONDecoder().raw_decode(raw.strip())
+    except json.JSONDecodeError:
+        return None
+    return _decode_tool_call(data)
+
+
 class LLMClient:
     """LLM客户端"""
     
@@ -156,6 +202,56 @@ class LLMClient:
         content = extract_chat_completion_text(response)
         return _clean_chat_text(content)
     
+    def chat_with_tools(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: List[Dict[str, Any]],
+        temperature: float = 0.7,
+        max_tokens: Optional[int] = 4096,
+    ) -> Dict[str, Any]:
+        """
+        Chat with tools registered natively (tool_choice="auto").
+
+        Returns {"content": str, "tool_calls": [{"name", "parameters"}]}.
+        Models such as GPT-OSS emit native tool calls even when a prompt asks
+        for a text protocol; declaring the tools keeps those calls valid.
+        """
+        try:
+            response = create_chat_completion(
+                self.client,
+                model=self.model,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                tools=tools or None,
+                tool_choice="auto" if tools else None,
+            )
+        except Exception as error:
+            recovered = _recover_failed_tool_generation(error)
+            if recovered is None:
+                raise
+            logger.warning(
+                "Recovered tool call '%s' from provider tool_use_failed response",
+                recovered["name"],
+            )
+            return {"content": "", "tool_calls": [recovered]}
+
+        choices = getattr(response, "choices", None) or []
+        message = getattr(choices[0], "message", None) if choices else None
+        tool_calls: List[Dict[str, Any]] = []
+        for native in getattr(message, "tool_calls", None) or []:
+            function = getattr(native, "function", None)
+            if function is None:
+                continue
+            decoded = _decode_tool_call(
+                {"name": getattr(function, "name", None), "arguments": getattr(function, "arguments", None) or "{}"}
+            )
+            if decoded:
+                tool_calls.append(decoded)
+
+        content = _clean_chat_text(extract_chat_completion_text(response))
+        return {"content": content, "tool_calls": tool_calls}
+
     def chat_json(
         self,
         messages: List[Dict[str, str]],

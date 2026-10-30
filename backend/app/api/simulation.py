@@ -20,7 +20,7 @@ from ..services.simulation_runner import (
 )
 from ..services.zep_graph_memory_updater import ZepGraphMemoryManager
 from ..utils.logger import get_logger
-from ..utils.locale import t, get_locale, set_locale
+from ..utils.locale import t, get_locale, set_locale, get_language_instruction
 from ..utils.zep_lifecycle import get_graph_readers, graph_lifecycle_lock
 from ..models.project import ProjectManager
 
@@ -52,7 +52,21 @@ def _get_default_platform(simulation_id: str) -> str:
 
 # Interview prompt 优化前缀
 # 添加此前缀可以避免Agent调用工具，直接用文本回复
-INTERVIEW_PROMPT_PREFIX = "结合你的人设、所有的过往记忆与行动，不调用任何工具直接用文本回复我："
+INTERVIEW_PROMPT_PREFIXES = {
+    "zh": "结合你的人设、所有的过往记忆与行动，不调用任何工具直接用文本回复我：",
+    "en": (
+        "Drawing on your persona and all of your past memories and actions, "
+        "reply to me directly in plain text without calling any tools: "
+    ),
+}
+
+
+def _interview_prompt_prefix() -> str:
+    """Interview wrapper in the request language (English plus an explicit language rule otherwise)."""
+    locale = get_locale()
+    if locale in INTERVIEW_PROMPT_PREFIXES:
+        return INTERVIEW_PROMPT_PREFIXES[locale]
+    return f"{get_language_instruction()} {INTERVIEW_PROMPT_PREFIXES['en']}"
 
 
 def optimize_interview_prompt(prompt: str) -> str:
@@ -67,10 +81,11 @@ def optimize_interview_prompt(prompt: str) -> str:
     """
     if not prompt:
         return prompt
+    prefix = _interview_prompt_prefix()
     # 避免重复添加前缀
-    if prompt.startswith(INTERVIEW_PROMPT_PREFIX):
+    if prompt.startswith(prefix) or any(prompt.startswith(p) for p in INTERVIEW_PROMPT_PREFIXES.values()):
         return prompt
-    return f"{INTERVIEW_PROMPT_PREFIX}{prompt}"
+    return f"{prefix}{prompt}"
 
 
 # ============== 实体读取接口 ==============
